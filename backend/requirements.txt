@@ -1,0 +1,9 @@
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.0.0
+selenium>=4.15.0
+webdriver-manager>=4.0.1
+openpyxl>=3.1.2
+python-dotenv>=1.0.0
+# 봇 감지 우회 강화 시 사용 (USE_UNDETECTED_CHROME=1)
+undetected-chromedriver>=3.5.0

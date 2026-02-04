@@ -1,0 +1,4 @@
+# Streamlit Cloud 배포 시 사용 (메인 파일: 루트 app.py)
+streamlit>=1.29.0
+requests>=2.31.0
+python-dotenv>=1.0.0
