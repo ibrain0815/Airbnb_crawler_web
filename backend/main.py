@@ -37,6 +37,10 @@ class CrawlRequest(BaseModel):
     max_pages: int = Field(5, ge=1, le=20, description="최대 크롤링 페이지 수")
 
 
+class ListingsPayload(BaseModel):
+    listings: list[dict] = Field(default_factory=list, description="크롤링된 숙소 목록")
+
+
 def _run_crawl_background(job_id: str, search_url: str, max_pages: int) -> None:
     """백그라운드 스레드에서 크롤링 실행, JobManager 로 상태 갱신."""
     try:
@@ -50,6 +54,26 @@ def _run_crawl_background(job_id: str, search_url: str, max_pages: int) -> None:
     except Exception as e:
         logger.exception("크롤링 실패: %s", e)
         JobManager.set_failed(job_id, str(e))
+
+
+@app.post("/crawl_sync")
+def crawl_sync(req: CrawlRequest) -> dict:
+    """
+    동기 크롤링 엔드포인트.
+
+    - JobManager 를 사용하지 않고, 서버 메모리에 작업 상태를 저장하지 않음.
+    - 호출이 끝나면 즉시 전체 결과를 JSON 으로 반환.
+    """
+    try:
+        listings = run_crawl(req.search_url, req.max_pages)
+        return {
+            "status": "completed",
+            "total_listings": len(listings),
+            "listings": listings,
+        }
+    except Exception as e:
+        logger.exception("동기 크롤링 실패: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/crawl")
@@ -136,6 +160,22 @@ def download_crawl_result(job_id: str):
             detail=f"job not completed (status={job['status']})",
         )
     listings = JobManager.get_listings(job_id)
+    content = save_listings_to_excel(listings)
+    filename = get_excel_filename()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/excel-from-listings")
+def excel_from_listings(payload: ListingsPayload):
+    """
+    클라이언트에서 전달한 listings JSON 을 엑셀 파일로 변환해 바로 반환.
+    - 서버에 결과를 저장하지 않고, 요청 범위 내 메모리에서만 처리.
+    """
+    listings = payload.listings or []
     content = save_listings_to_excel(listings)
     filename = get_excel_filename()
     return Response(
