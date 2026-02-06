@@ -1,14 +1,15 @@
 """
-Streamlit Cloud 진입점 (루트).
-Main file path = app.py 로 배포. import 시 frontend/app.py 가 로드되며 그 안에서 main() 실행됨.
+Streamlit Cloud / 로컬 공통 진입점 (루트).
+Main file path = app.py 로 배포. 여기서 frontend/app.py 를 직접 실행(run_path)하여
+그 안의 Streamlit 앱(main 함수)을 구동한다.
 """
-import sys
+
 import os
+import runpy
+
 
 _root = os.path.dirname(os.path.abspath(__file__))
-_frontend = os.path.join(_root, "frontend")
-if _frontend not in sys.path:
-    sys.path.insert(0, _frontend)
+_frontend_app_path = os.path.join(_root, "frontend", "app.py")
 
-# frontend/app.py 로드 → 해당 파일 끝에서 main() 호출됨
-import app as _frontend_app
+# frontend/app.py 스크립트를 별도 모듈로 실행 (자기 자신을 다시 import 하지 않도록 run_path 사용)
+runpy.run_path(_frontend_app_path, run_name="__main__")
