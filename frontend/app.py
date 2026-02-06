@@ -22,7 +22,8 @@ def _get_backend_url() -> str:
                 return str(url).rstrip("/")
     except Exception:
         pass
-    return os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
+    # 기본값을 127.0.0.1로 지정 (로컬에서 연결 문제 줄이기)
+    return os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
 # 지연 계산: import 시 st.secrets 미준비로 오류 나는 것 방지 (Streamlit Cloud 등)
@@ -37,9 +38,16 @@ AIRBNB_URL = "https://www.airbnb.co.kr/"
 def check_backend() -> bool:
     """백엔드 연결 확인."""
     try:
-        r = requests.get(f"{_backend_url()}/health", timeout=3)
-        return r.status_code == 200
-    except Exception:
+        url = f"{_backend_url()}/health"
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            return True
+        # 상태코드가 200이 아니면 상세 이유를 화면에 표시
+        st.error(f"백엔드 health 체크 실패: {url} (status={r.status_code}, body={r.text})")
+        return False
+    except Exception as e:
+        # 예외 내용을 그대로 보여줘서 문제 원인을 바로 확인할 수 있도록 함
+        st.error(f"백엔드 health 체크 예외: {_backend_url()}/health\n\n{e}")
         return False
 
 
