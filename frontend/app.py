@@ -43,46 +43,41 @@ def check_backend() -> bool:
         return False
 
 
-def start_crawl_sync(search_url: str, max_pages: int) -> list[dict] | None:
-    """
-    동기 크롤링 호출.
-    - POST /crawl_sync
-    - 서버는 JobManager 에 상태를 저장하지 않고, 결과 JSON 만 반환.
-    """
+def start_crawl(search_url: str, max_pages: int) -> str | None:
+    """POST /crawl 호출 후 job_id 반환. 실패 시 None."""
     try:
         r = requests.post(
-            f"{_backend_url()}/crawl_sync",
+            f"{_backend_url()}/crawl",
             json={"search_url": search_url, "max_pages": max_pages},
-            timeout=600,
+            timeout=10,
         )
         r.raise_for_status()
-        data = r.json()
-        if data.get("status") != "completed":
-            st.error(f"크롤링 실패: {data.get('error') or data.get('detail') or '알 수 없는 오류'}")
-            return None
-        listings = data.get("listings")
-        return listings if isinstance(listings, list) else []
+        return r.json().get("job_id")
     except Exception as e:
-        st.error(f"크롤링 호출 실패: {e}")
+        st.error(f"크롤링 시작 실패: {e}")
         return None
 
 
-def get_excel_from_backend(listings: list[dict]) -> bytes | None:
-    """
-    프론트에 저장된 listings 를 백엔드로 보내 엑셀 파일 bytes 로 변환.
-    - 서버는 요청 범위 내에서만 처리하고, 결과를 저장하지 않음.
-    """
+def fetch_status(job_id: str) -> dict:
+    """현재 상태 1회 조회. 실패 시 failed 상태 반환."""
     try:
-        r = requests.post(
-            f"{_backend_url()}/excel-from-listings",
-            json={"listings": listings},
-            timeout=120,
-        )
+        r = requests.get(f"{_backend_url()}/crawl/{job_id}/status/json", timeout=10)
+        if r.status_code == 404:
+            return {
+                "status": "failed",
+                "error_message": "작업을 찾을 수 없습니다. (백엔드 재시작 시 이전 작업은 사라집니다) 크롤링을 다시 시작해 주세요.",
+                "job_not_found": True,
+            }
         r.raise_for_status()
-        return r.content
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        return {"status": "failed", "error_message": str(e)}
     except Exception as e:
-        st.error(f"엑셀 생성 요청 실패: {e}")
-        return None
+        return {"status": "failed", "error_message": str(e)}
+
+
+def get_download_url(job_id: str) -> str:
+    return f"{_backend_url()}/crawl/{job_id}/download"
 
 
 def main() -> None:
@@ -135,13 +130,9 @@ def main() -> None:
     st.divider()
 
     # --------------------------------------------------
-    # Step 3: 크롤링 실행 (동기 호출, 결과는 프론트 세션에만 저장)
+    # Step 3: 크롤링 실행 (백그라운드 + 진행률 폴링)
     # --------------------------------------------------
     st.subheader("3단계: 크롤링 및 엑셀 내보내기")
-
-    if "listings" not in st.session_state:
-        st.session_state["listings"] = []
-
     if st.button("크롤링 시작", type="primary"):
         url_to_use = (search_url or "").strip()
         if not url_to_use:
@@ -154,41 +145,105 @@ def main() -> None:
                     "`cd backend` 후 `python -m uvicorn main:app --reload`"
                 )
             else:
-                with st.spinner("크롤링 중입니다. 잠시만 기다려 주세요..."):
-                    listings = start_crawl_sync(url_to_use, max_pages)
-                if listings is not None:
-                    st.session_state["listings"] = listings
-                    st.session_state["last_crawl_meta"] = {
-                        "search_url": url_to_use,
-                        "max_pages": max_pages,
-                        "total_listings": len(listings),
-                        "finished_at": datetime.now().isoformat(timespec="seconds"),
-                    }
+                job_id = start_crawl(url_to_use, max_pages)
+                if job_id:
+                    st.session_state["job_id"] = job_id
+                    st.session_state["max_pages"] = max_pages
+                    st.session_state["progress_log"] = []
 
-    listings = st.session_state.get("listings") or []
+    job_id = st.session_state.get("job_id")
+    if not job_id:
+        return
+
+    # --------------------------------------------------
+    # 진행 현황 (실시간)
+    # --------------------------------------------------
+    if "progress_log" not in st.session_state:
+        st.session_state["progress_log"] = []
+
+    st.subheader("📊 크롤링 진행 현황")
+    st.caption("백엔드에서 상태를 가져오는 중… 연결이 안 되면 아래에 오류가 표시됩니다.")
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    log_placeholder = st.empty()
+    table_placeholder = st.empty()
+
+    last_data: dict[str, Any] = {}
+    data = fetch_status(job_id)
+    last_data = data
+    with st.expander("백엔드 상태 응답 (JSON)", expanded=False):
+        st.json(data)
+    status = data.get("status", "")
+    current = data.get("current_page", 0)
+    total = data.get("max_pages", 1) or 1
+    total_listings = data.get("total_listings", 0)
+    listings = data.get("listings") if isinstance(data.get("listings"), list) else []
+    progress_pct = data.get("progress_percent", 0) or (100 * current / total if total else 0)
+
+    # 로그 한 줄 추가
+    ts = datetime.now().strftime("%H:%M:%S")
+    log_line = f"[{ts}] 페이지 {current}/{total} · 수집 {total_listings}건 · 상태: {status}"
+    if not st.session_state["progress_log"] or st.session_state["progress_log"][-1] != log_line:
+        st.session_state["progress_log"].append(log_line)
+
+    # 진행률 바
+    progress_placeholder.progress(progress_pct / 100.0)
+
+    # 요약 상태
+    status_placeholder.markdown(
+        f"""
+        | 항목 | 값 |
+        |------|-----|
+        | **상태** | `{status}` |
+        | **현재 페이지** | {current} / {total} |
+        | **수집 건수** | **{total_listings}건** |
+        | **진행률** | {progress_pct:.1f}% |
+        """
+    )
+
+    # 진행 로그 (최근 20줄)
+    log_text = "\n".join(st.session_state["progress_log"][-20:])
+    log_placeholder.code(log_text or "대기 중...", language=None)
 
     if listings:
-        meta = st.session_state.get("last_crawl_meta", {})
-        st.subheader("📊 크롤링 결과 (로컬 세션에 저장됨)")
-        if meta:
-            st.caption(
-                f"URL: `{meta.get('search_url', '')}` · "
-                f"페이지: {meta.get('max_pages', 0)} · "
-                f"총 {meta.get('total_listings', len(listings))}건 · "
-                f"완료 시각: {meta.get('finished_at', '')}"
-            )
+        table_placeholder.dataframe(listings, use_container_width=True)
 
-        st.dataframe(listings, use_container_width=True)
+    if status == "failed":
+        err_msg = data.get("error_message") or "알 수 없는 오류"
+        st.error(err_msg)
+        if "job_id" in st.session_state:
+            del st.session_state["job_id"]
+        st.info("아래에서 URL을 입력한 뒤 **크롤링 시작**을 다시 눌러 주세요.")
+        if st.button("처음으로 (입력 화면으로 돌아가기)", type="primary"):
+            st.rerun()
+        st.stop()
+    if status == "completed":
+        st.success(f"크롤링 완료: 총 {total_listings}건 수집")
+    else:
+        auto = st.checkbox("자동 갱신(2초)", value=True)
+        if st.button("상태 새로고침"):
+            st.rerun()
+        if auto:
+            time.sleep(2)
+            st.rerun()
 
+    # 엑셀 내보내기
+    listings_for_download = last_data.get("listings") if isinstance(last_data.get("listings"), list) else []
+    if last_data.get("status") == "completed" and listings_for_download:
         st.subheader("엑셀 내보내기")
-        excel_bytes = get_excel_from_backend(listings)
-        if excel_bytes:
-            st.download_button(
-                label="엑셀 파일 내보내기",
-                data=excel_bytes,
-                file_name=f"airbnb_listings_{int(time.time())}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        try:
+            resp = requests.get(get_download_url(job_id), timeout=30)
+            if resp.status_code == 200:
+                st.download_button(
+                    label="엑셀 파일 내보내기",
+                    data=resp.content,
+                    file_name=f"airbnb_listings_{int(time.time())}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.warning("엑셀 다운로드 준비 중 오류가 발생했습니다.")
+        except Exception as e:
+            st.error(f"다운로드 요청 실패: {e}")
 
 
 # Streamlit Cloud는 스크립트를 import 방식으로 실행할 수 있어, __main__일 때만 실행하면 main()이 호출되지 않을 수 있음.
